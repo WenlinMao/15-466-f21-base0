@@ -132,24 +132,16 @@ bool PongMode::handle_event(SDL_Event const &evt, glm::uvec2 const &window_size)
 }
 
 void PongMode::update(float elapsed) {
-
+	survival_time += elapsed;
+	if (survival_time > 2.f) {
+		score++;
+		survival_time = 0.f;
+	}
+ 
 	static std::mt19937 mt; //mersenne twister pseudo-random number generator
 
 	//----- paddle update -----
-
-	{ //right player ai:
-		ai_offset_update -= elapsed;
-		if (ai_offset_update < elapsed) {
-			//update again in [0.5,1.0) seconds:
-			ai_offset_update = (mt() / float(mt.max())) * 0.5f + 0.5f;
-			ai_offset = (mt() / float(mt.max())) * 2.5f - 1.25f;
-		}
-		if (right_paddle.y < ball.y + ai_offset) {
-			right_paddle.y = std::min(ball.y + ai_offset, right_paddle.y + 2.0f * elapsed);
-		} else {
-			right_paddle.y = std::max(ball.y + ai_offset, right_paddle.y - 2.0f * elapsed);
-		}
-	}
+	right_paddle.y = -left_paddle.y;
 
 	//clamp paddles to court:
 	right_paddle.y = std::max(right_paddle.y, -court_radius.y + paddle_radius.y);
@@ -161,17 +153,18 @@ void PongMode::update(float elapsed) {
 	//----- ball update -----
 
 	//speed of ball doubles every four points:
-	float speed_multiplier = 4.0f * std::pow(2.0f, (left_score + right_score) / 4.0f);
+	speed_multiplier += elapsed / 8.f;
 
 	//velocity cap, though (otherwise ball can pass through paddles):
 	speed_multiplier = std::min(speed_multiplier, 10.0f);
 
 	ball += elapsed * speed_multiplier * ball_velocity;
+	ball2 += elapsed * speed_multiplier * ball2_velocity;
 
 	//---- collision handling ----
 
-	//paddles:
-	auto paddle_vs_ball = [this](glm::vec2 const &paddle) {
+	// paddles:
+	auto paddle_vs_ball = [this](glm::vec2 const &paddle, glm::vec2 & ball, glm::vec2 & ball_velocity) {
 		//compute area of overlap:
 		glm::vec2 min = glm::max(paddle - paddle_radius, ball - ball_radius);
 		glm::vec2 max = glm::min(paddle + paddle_radius, ball + ball_radius);
@@ -202,39 +195,78 @@ void PongMode::update(float elapsed) {
 			ball_velocity.y = glm::mix(ball_velocity.y, vel, 0.75f);
 		}
 	};
-	paddle_vs_ball(left_paddle);
-	paddle_vs_ball(right_paddle);
+	paddle_vs_ball(left_paddle, ball, ball_velocity);
+	paddle_vs_ball(right_paddle, ball, ball_velocity);
+	paddle_vs_ball(left_paddle, ball2, ball2_velocity);
+	paddle_vs_ball(right_paddle, ball2, ball2_velocity);
 
-	//court walls:
-	if (ball.y > court_radius.y - ball_radius.y) {
-		ball.y = court_radius.y - ball_radius.y;
-		if (ball_velocity.y > 0.0f) {
+	// court walls:
+	auto wall_vs_ball = [this](glm::vec2 & ball, glm::vec2 & ball_velocity){
+		if (ball.y > court_radius.y - ball_radius.y) {
+			ball.y = court_radius.y - ball_radius.y;
+			if (ball_velocity.y > 0.0f) {
+				ball_velocity.y = -ball_velocity.y;
+			}
+		}
+		if (ball.y < -court_radius.y + ball_radius.y) {
+			ball.y = -court_radius.y + ball_radius.y;
+			if (ball_velocity.y < 0.0f) {
+				ball_velocity.y = -ball_velocity.y;
+			}
+		}
+
+		if (ball.x > court_radius.x - ball_radius.x) {
+			ball.x = -court_radius.x + ball_radius.x;
 			ball_velocity.y = -ball_velocity.y;
+			ball_velocity.y += (mt() / float(mt.max()));
 		}
-	}
-	if (ball.y < -court_radius.y + ball_radius.y) {
-		ball.y = -court_radius.y + ball_radius.y;
-		if (ball_velocity.y < 0.0f) {
+		if (ball.x < -court_radius.x + ball_radius.x) {
+			ball.x = court_radius.x - ball_radius.x;
 			ball_velocity.y = -ball_velocity.y;
+			ball_velocity.y += (mt() / float(mt.max()));
 		}
-	}
+	};
+	wall_vs_ball(ball, ball_velocity);
+	wall_vs_ball(ball2, ball2_velocity);
 
-	if (ball.x > court_radius.x - ball_radius.x) {
-		ball.x = court_radius.x - ball_radius.x;
-		if (ball_velocity.x > 0.0f) {
-			ball_velocity.x = -ball_velocity.x;
-			left_score += 1;
-		}
-	}
-	if (ball.x < -court_radius.x + ball_radius.x) {
-		ball.x = -court_radius.x + ball_radius.x;
-		if (ball_velocity.x < 0.0f) {
-			ball_velocity.x = -ball_velocity.x;
-			right_score += 1;
-		}
-	}
+	// center wall
+	auto center_vs_ball = [this](glm::vec2 & ball, glm::vec2 & ball_velocity){
+		//compute area of overlap:
+		glm::vec2 min = glm::max(-center_wall, ball - ball_radius);
+		glm::vec2 max = glm::min(center_wall, ball + ball_radius);
 
-	//----- gradient trails -----
+		//if no overlap, no collision:
+		if (min.x > max.x || min.y > max.y) return;
+
+		health--;
+
+		if (max.x - min.x > max.y - min.y) {
+			//wider overlap in x => bounce in y direction:
+			if (ball.y > 0.f) {
+				ball.y = 0.f + center_wall.y + ball_radius.y;
+				ball_velocity.y = std::abs(ball_velocity.y);
+			} else {
+				ball.y = 0.f - center_wall.y - ball_radius.y;
+				ball_velocity.y = -std::abs(ball_velocity.y);
+			}
+		} else {
+			//wider overlap in y => bounce in x direction:
+			if (ball.x > 0.f) {
+				ball.x = 0.f + center_wall.x + ball_radius.x;
+				ball_velocity.x = std::abs(ball_velocity.x);
+			} else {
+				ball.x = 0.f - center_wall.x - ball_radius.x;
+				ball_velocity.x = -std::abs(ball_velocity.x);
+			}
+			//warp y velocity based on offset from paddle center:
+			float vel = (ball.y - 0.f) / (center_wall.y + ball_radius.y);
+			ball_velocity.y = glm::mix(ball_velocity.y, vel, 0.75f);
+		}
+	};
+	center_vs_ball(ball, ball_velocity);
+	center_vs_ball(ball2, ball2_velocity);
+
+	// //----- gradient trails -----
 
 	//age up all locations in ball trail:
 	for (auto &t : ball_trail) {
@@ -247,6 +279,19 @@ void PongMode::update(float elapsed) {
 	//NOTE: since trail drawing interpolates between points, only removes back element if second-to-back element is too old:
 	while (ball_trail.size() >= 2 && ball_trail[1].z > trail_length) {
 		ball_trail.pop_front();
+	}
+
+	// Game Over - reset
+	if (health == 0){
+		ball = glm::vec2(4.0f, 2.0f);
+		ball2 = glm::vec2(-4.0f, -2.0f);
+
+		ball_velocity = glm::vec2(-1.0f, -0.5f);
+		ball2_velocity = glm::vec2(1.0f, 0.5f);
+
+		speed_multiplier = 3.f;
+		health = 20;
+		score = 0;
 	}
 }
 
@@ -348,6 +393,7 @@ void PongMode::draw(glm::uvec2 const &drawable_size) {
 	draw_rectangle(glm::vec2( court_radius.x+wall_radius, 0.0f), glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), fg_color);
 	draw_rectangle(glm::vec2( 0.0f,-court_radius.y-wall_radius), glm::vec2(court_radius.x, wall_radius), fg_color);
 	draw_rectangle(glm::vec2( 0.0f, court_radius.y+wall_radius), glm::vec2(court_radius.x, wall_radius), fg_color);
+	draw_rectangle(glm::vec2(0.0f, 0.0f), glm::vec2(center_wall.x, center_wall.y), fg_color);
 
 	//paddles:
 	draw_rectangle(left_paddle, paddle_radius, fg_color);
@@ -356,17 +402,16 @@ void PongMode::draw(glm::uvec2 const &drawable_size) {
 
 	//ball:
 	draw_rectangle(ball, ball_radius, fg_color);
+	draw_rectangle(ball2, ball_radius, fg_color);
 
 	//scores:
 	glm::vec2 score_radius = glm::vec2(0.1f, 0.1f);
-	for (uint32_t i = 0; i < left_score; ++i) {
+	for (uint32_t i = 0; i < health; ++i) {
 		draw_rectangle(glm::vec2( -court_radius.x + (2.0f + 3.0f * i) * score_radius.x, court_radius.y + 2.0f * wall_radius + 2.0f * score_radius.y), score_radius, fg_color);
 	}
-	for (uint32_t i = 0; i < right_score; ++i) {
+	for (uint32_t i = 0; i < score; ++i) {
 		draw_rectangle(glm::vec2( court_radius.x - (2.0f + 3.0f * i) * score_radius.x, court_radius.y + 2.0f * wall_radius + 2.0f * score_radius.y), score_radius, fg_color);
 	}
-
-
 
 	//------ compute court-to-window transform ------
 
